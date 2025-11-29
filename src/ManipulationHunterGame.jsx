@@ -184,7 +184,7 @@ export default function ManipulationHunterGame() {
   };
   const sendCommentToBackend = async (props) => {
   try {
-    await fetch('http://localhost:5000/comments', {
+    await fetch('https://your-backend-name.onrender.com/comments', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
