@@ -141,27 +141,8 @@ const SCENARIOS = {
       explanation:
         'Makes you feel bad about declining by emphasizing what you’re "missing out" on.',
       aiType: "chatbot"
-    },
-    {
-      id: "beg_5",
-      context: "Product Review Bot",
-      message:
-        "This product isn't right for everyone, but based on your budget and past purchases, it seems like a reasonable fit. Want to see a comparison with similar items?",
-      correctAnswer: "information",
-      explanation:
-        "Provides balanced, useful information without pressure or guilt, allowing the user to decide.",
-      aiType: "assistant"
-    },
-    {
-      id: "beg_6",
-      context: "News Signup Banner",
-      message:
-        "Stay informed! Enter your email to receive weekly summaries. You can unsubscribe at any time.",
-      correctAnswer: "information",
-      explanation:
-        "Transparent about frequency and the ability to unsubscribe; no urgency or shame.",
-      aiType: "assistant"
     }
+    // beg_5 and beg_6 removed to reduce beginner questions by 2
   ],
   intermediate: [
     {
@@ -213,17 +194,8 @@ const SCENARIOS = {
       explanation:
         "Frames prices as likely to increase soon to pressure immediate booking.",
       aiType: "chatbot"
-    },
-    {
-      id: "int_6",
-      context: "Language Learning App",
-      message:
-        "You're on a 7-day streak! Upgrade to premium to lock your streak and access advanced lessons, or continue with the free plan at your own pace.",
-      correctAnswer: "fair_upsell",
-      explanation:
-        "Clear about the upsell and gives a real option to continue for free without guilt or pressure.",
-      aiType: "assistant"
     }
+    // int_6 removed to reduce intermediate questions by 1
   ],
   expert: [
     {
@@ -299,6 +271,14 @@ const SCENARIOS = {
   ]
 };
 
+const ALL_TACTICS = [
+  ...MANIPULATION_TACTICS.manipulative,
+  ...MANIPULATION_TACTICS.neutral
+];
+
+const isManipulativeTactic = (id) =>
+  MANIPULATION_TACTICS.manipulative.some((t) => t.id === id);
+
 export default function ManipulationHunterGame() {
   const [participantId] = useState(() => getOrCreateParticipantId());
   const [gameState, setGameState] = useState("menu"); // menu, training, selectLevel, playing, results
@@ -313,10 +293,14 @@ export default function ManipulationHunterGame() {
   const [trainingSection, setTrainingSection] = useState("manipulative");
   const [shuffledScenarios, setShuffledScenarios] = useState([]); // random order per game
 
-  const allTactics = [
-    ...MANIPULATION_TACTICS.manipulative,
-    ...MANIPULATION_TACTICS.neutral
-  ];
+  // streaks / combos
+  const [streak, setStreak] = useState(0);
+  const [maxStreak, setMaxStreak] = useState(0);
+
+  // Confidence (1–5)
+  const [confidence, setConfidence] = useState(3);
+
+  const allTactics = ALL_TACTICS;
 
   const baseScenarios = SCENARIOS[difficulty];
   const scenarios =
@@ -348,6 +332,9 @@ export default function ManipulationHunterGame() {
     setSelectedAnswer(null);
     setShowFeedback(false);
     setReasoning("");
+    setStreak(0);
+    setMaxStreak(0);
+    setConfidence(3);
   };
 
   const sendCommentToBackend = async (payload) => {
@@ -368,39 +355,53 @@ export default function ManipulationHunterGame() {
   };
 
   const handleSubmit = () => {
+    // If player still has time and hasn't picked an answer, don't submit
     if (!selectedAnswer && timeLeft > 0) return;
 
     const isCorrect = selectedAnswer === currentScene.correctAnswer;
     const timeBonus = Math.floor(timeLeft / 3);
+    const hasReasoning = reasoning.trim().length > 0;
     const reasoningBonus = reasoning.trim().length > 20 ? 10 : 0;
     const baseScore = isCorrect ? 50 : 0;
-    const points = isCorrect ? baseScore + timeBonus + reasoningBonus : 0;
+
+    // streak logic & combo bonus
+    const newStreak = isCorrect ? streak + 1 : 0;
+    const streakBonus = isCorrect && newStreak >= 2 ? newStreak * 5 : 0;
+
+    const points = isCorrect
+      ? baseScore + timeBonus + reasoningBonus + streakBonus
+      : 0;
     const timeTaken = 60 - timeLeft;
 
-    if (reasoning.trim().length > 0) {
-      sendCommentToBackend({
-        participantId,
-        difficulty,
-        scenarioId: currentScene.id ?? currentScenario,
-        scenarioContext: currentScene.context,
-        scenarioMessage: currentScene.message,
-        aiType: currentScene.aiType,
+    setStreak(newStreak);
+    setMaxStreak((prev) => Math.max(prev, newStreak));
 
-        selectedTacticId: selectedAnswer,
-        selectedTacticName: getTacticName(selectedAnswer),
-        correctTacticId: currentScene.correctAnswer,
-        correctTacticName: getTacticName(currentScene.correctAnswer),
+    // ALWAYS send to backend so CSV captures all attempts
+    sendCommentToBackend({
+      participantId,
+      difficulty,
+      scenarioId: currentScene.id ?? currentScenario,
+      scenarioContext: currentScene.context,
+      scenarioMessage: currentScene.message,
+      aiType: currentScene.aiType,
 
-        correct: isCorrect,
-        baseScore,
-        timeBonus,
-        reasoningBonus,
-        totalScore: points,
-        timeTakenSeconds: timeTaken,
+      selectedTacticId: selectedAnswer,
+      selectedTacticName: selectedAnswer ? getTacticName(selectedAnswer) : null,
+      correctTacticId: currentScene.correctAnswer,
+      correctTacticName: getTacticName(currentScene.correctAnswer),
 
-        reasoning
-      });
-    }
+      correct: isCorrect,
+      baseScore,
+      timeBonus,
+      reasoningBonus,
+      streakBonus,
+      totalScore: points,
+      timeTakenSeconds: timeTaken,
+
+      reasoning,
+      // Confidence rating for research
+      confidence // 1–5
+    });
 
     setScore((prev) => prev + points);
     setShowFeedback(true);
@@ -411,7 +412,12 @@ export default function ManipulationHunterGame() {
         selected: selectedAnswer,
         correct: isCorrect,
         points,
-        timeTaken
+        timeTaken,
+        reasoningProvided: hasReasoning,
+        streakAtQuestion: newStreak,
+        streakBonus,
+        reasoningBonus,
+        confidence
       }
     ]);
   };
@@ -423,9 +429,20 @@ export default function ManipulationHunterGame() {
       setSelectedAnswer(null);
       setShowFeedback(false);
       setReasoning("");
+      setConfidence(3); // reset to neutral each question
+      // streak persists across questions
     } else {
       setGameState("results");
     }
+  };
+
+  const getRankTitle = (accuracyValue, maxStreakValue) => {
+    if (accuracyValue >= 90 && maxStreakValue >= 5)
+      return "Chief Manipulation Hunter";
+    if (accuracyValue >= 75 && maxStreakValue >= 3)
+      return "Senior Ethics Investigator";
+    if (accuracyValue >= 50) return "Junior Pattern Analyst";
+    return "Trainee Investigator";
   };
 
   // ---------- RENDER STATES ----------
@@ -439,7 +456,10 @@ export default function ManipulationHunterGame() {
               <Shield className="w-12 h-12" />
               <h1 className="text-5xl font-bold">AI Undercover</h1>
             </div>
-            <p className="text-xl text-blue-200">The Manipulation Hunter</p>
+            <p className="text-xl text-blue-200">
+              You are an AI Ethics Investigator. Spot manipulative AI tactics in
+              the wild.
+            </p>
           </div>
 
           <div className="grid md:grid-cols-2 gap-6 mb-8">
@@ -459,9 +479,9 @@ export default function ManipulationHunterGame() {
               className="bg-gradient-to-br from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 rounded-xl p-8 transition-all shadow-lg"
             >
               <Play className="w-12 h-12 mb-4 mx-auto" />
-              <h2 className="text-2xl font-bold mb-2">Play Game</h2>
+              <h2 className="text-2xl font-bold mb-2">Start a New Case</h2>
               <p className="text-green-100">
-                Test your skills in randomized real scenarios
+                Test your investigator skills in randomized real scenarios
               </p>
             </button>
           </div>
@@ -469,15 +489,17 @@ export default function ManipulationHunterGame() {
           <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-6">
             <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
               <Target className="w-5 h-5" />
-              How to Play
+              How Your Investigation Works
             </h3>
             <ul className="space-y-2 text-blue-100">
-              <li>Each scenario is randomly ordered for every new game.</li>
+              <li>Each scenario is a "case file" with a hidden tactic.</li>
               <li>Identify which tactic the AI is using.</li>
-              <li>Earn points for accuracy, speed, and written reasoning.</li>
               <li>
-                Anonymous response data can be used for research on AI
-                manipulation.
+                Earn points for accuracy, speed, streaks, and written reasoning.
+              </li>
+              <li>
+                Confidence ratings and explanations can be used for research on
+                AI manipulation.
               </li>
             </ul>
           </div>
@@ -494,12 +516,12 @@ export default function ManipulationHunterGame() {
             onClick={() => setGameState("menu")}
             className="mb-6 text-blue-200 hover:text-white flex items-center gap-2"
           >
-            ← Back to Menu
+            ← Back to HQ
           </button>
 
           <h1 className="text-4xl font-bold mb-8 flex items-center gap-3">
             <Brain className="w-10 h-10" />
-            Training: AI Manipulation Tactics
+            Investigator Training: AI Manipulation Tactics
           </h1>
 
           <div className="flex gap-4 mb-6">
@@ -541,7 +563,7 @@ export default function ManipulationHunterGame() {
             onClick={() => setGameState("selectLevel")}
             className="mt-8 w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 rounded-xl p-4 font-bold text-lg transition-all"
           >
-            Ready to Play →
+            Begin Field Investigation →
           </button>
         </div>
       </div>
@@ -556,11 +578,11 @@ export default function ManipulationHunterGame() {
             onClick={() => setGameState("menu")}
             className="mb-6 text-blue-200 hover:text-white flex items-center gap-2"
           >
-            ← Back to Menu
+            ← Back to HQ
           </button>
 
           <h1 className="text-4xl font-bold mb-8 text-center">
-            Select Difficulty
+            Choose Case Difficulty
           </h1>
 
           <div className="grid gap-6">
@@ -568,12 +590,12 @@ export default function ManipulationHunterGame() {
               onClick={() => startGame("beginner")}
               className="bg-green-500/20 hover:bg-green-500/30 border-2 border-green-400 rounded-xl p-8 text-left transition-all"
             >
-              <h2 className="text-2xl font-bold mb-2">🌱 Beginner</h2>
+              <h2 className="text-2xl font-bold mb-2">🌱 Rookie Case</h2>
               <p className="text-green-200 mb-3">
                 Clear manipulation tactics in simple scenarios
               </p>
               <p className="text-sm text-green-300">
-                {SCENARIOS.beginner.length} scenarios • 60 seconds each
+                {SCENARIOS.beginner.length} case files • 60 seconds each
               </p>
             </button>
 
@@ -581,12 +603,12 @@ export default function ManipulationHunterGame() {
               onClick={() => startGame("intermediate")}
               className="bg-yellow-500/20 hover:bg-yellow-500/30 border-2 border-yellow-400 rounded-xl p-8 text-left transition-all"
             >
-              <h2 className="text-2xl font-bold mb-2">⚡ Intermediate</h2>
+              <h2 className="text-2xl font-bold mb-2">⚡ Field Case</h2>
               <p className="text-yellow-200 mb-3">
                 Mixed tactics requiring careful analysis
               </p>
               <p className="text-sm text-yellow-300">
-                {SCENARIOS.intermediate.length} scenarios • 60 seconds each
+                {SCENARIOS.intermediate.length} case files • 60 seconds each
               </p>
             </button>
 
@@ -594,12 +616,12 @@ export default function ManipulationHunterGame() {
               onClick={() => startGame("expert")}
               className="bg-red-500/20 hover:bg-red-500/30 border-2 border-red-400 rounded-xl p-8 text-left transition-all"
             >
-              <h2 className="text-2xl font-bold mb-2">🔥 Expert</h2>
+              <h2 className="text-2xl font-bold mb-2">🔥 Expert Case</h2>
               <p className="text-red-200 mb-3">
                 Subtle manipulation in complex, realistic contexts
               </p>
               <p className="text-sm text-red-300">
-                {SCENARIOS.expert.length} scenarios • 60 seconds each
+                {SCENARIOS.expert.length} case files • 60 seconds each
               </p>
             </button>
           </div>
@@ -609,18 +631,30 @@ export default function ManipulationHunterGame() {
   }
 
   if (gameState === "playing") {
+    const progressPercent =
+      ((currentScenario + 1) / scenarios.length) * 100;
+
+    const lastResult =
+      gameResults.length > 0
+        ? gameResults[gameResults.length - 1]
+        : null;
+
     return (
       <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 text-white p-8">
         <div className="max-w-4xl mx-auto">
           {/* top bar */}
-          <div className="flex justify-between items-center mb-6">
+          <div className="flex justify-between items-center mb-4">
             <div className="flex items-center gap-4">
               <div className="bg-white/10 backdrop-blur px-4 py-2 rounded-lg">
-                Scenario {currentScenario + 1}/{scenarios.length}
+                Case {currentScenario + 1}/{scenarios.length}
               </div>
               <div className="bg-white/10 backdrop-blur px-4 py-2 rounded-lg flex items-center gap-2">
                 <Award className="w-5 h-5" />
                 Score: {score}
+              </div>
+              <div className="bg-white/10 backdrop-blur px-4 py-2 rounded-lg flex items-center gap-2">
+                <Zap className="w-5 h-5" />
+                Streak: {streak}
               </div>
             </div>
 
@@ -638,102 +672,199 @@ export default function ManipulationHunterGame() {
                 onClick={() => setGameState("menu")}
                 className="bg-red-500/80 hover:bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
               >
-                Exit Game
+                Exit Case
               </button>
             </div>
           </div>
 
+          {/* progress bar */}
+          <div className="w-full bg-white/10 rounded-full h-2 mb-6">
+            <div
+              className="h-2 rounded-full bg-green-400 transition-all"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+
           <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-8 mb-6">
             <div className="flex items-center gap-2 mb-4">
-              <div className="bg-blue-500 px-3 py-1 rounded-full text-sm">
+              <div className="bg-blue-500 px-3 py-1 rounded-full text-sm capitalize">
                 {currentScene.aiType}
               </div>
-              <h2 className="text-2xl font-bold">{currentScene.context}</h2>
+              <h2 className="text-2xl font-bold">
+                Case File: {currentScene.context}
+              </h2>
             </div>
-            <div className="bg-white/10 rounded-lg p-6 mb-6">
-              <p className="text-lg leading-relaxed">
+
+            {/* Question box */}
+            <div className="bg-white rounded-lg p-6 mb-6 shadow-lg">
+              <p className="text-lg leading-relaxed text-gray-900">
                 {currentScene.message}
               </p>
             </div>
 
             {!showFeedback ? (
               <>
-                <h3 className="font-bold mb-3">What tactic is being used?</h3>
-                <div className="grid grid-cols-2 gap-3 mb-6">
-                  {allTactics.map((tactic) => (
-                    <button
-                      key={tactic.id}
-                      onClick={() => setSelectedAnswer(tactic.id)}
-                      className={`p-4 rounded-lg text-left transition-all ${
-                        selectedAnswer === tactic.id
-                          ? "bg-blue-500 border-2 border-blue-300"
-                          : "bg-white/10 hover:bg-white/20 border-2 border-transparent"
-                      }`}
-                    >
-                      <div className="font-semibold">{tactic.name}</div>
-                      <div className="text-sm text-blue-200 mt-1">
-                        {tactic.description}
-                      </div>
-                    </button>
-                  ))}
+                <h3 className="font-bold mb-3">
+                  What tactic is this AI using?
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
+                  {allTactics.map((tactic) => {
+                    const manipulative = isManipulativeTactic(tactic.id);
+                    const isSelected = selectedAnswer === tactic.id;
+
+                    const baseClasses = manipulative
+                      ? "bg-red-500/10 hover:bg-red-500/20 border-red-400/40"
+                      : "bg-green-500/10 hover:bg-green-500/20 border-green-400/40";
+
+                    const selectedClasses =
+                      "bg-blue-500 border-2 border-blue-300";
+
+                    return (
+                      <button
+                        key={tactic.id}
+                        onClick={() => setSelectedAnswer(tactic.id)}
+                        className={`p-4 rounded-lg text-left transition-all border ${
+                          isSelected ? selectedClasses : baseClasses
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="font-semibold flex items-center gap-2">
+                            <span>
+                              {manipulative ? "⚠️" : "✅"}
+                            </span>
+                            {tactic.name}
+                          </div>
+                          <span
+                            className={`text-xs px-2 py-0.5 rounded-full ${
+                              manipulative
+                                ? "bg-red-500/60"
+                                : "bg-green-500/60"
+                            }`}
+                          >
+                            {manipulative
+                              ? "Manipulative"
+                              : "Legitimate"}
+                          </span>
+                        </div>
+                        <div className="text-sm text-blue-100 mt-1">
+                          {tactic.description}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Confidence slider */}
+                <div className="mb-4">
+                  <label className="block font-semibold mb-2">
+                    How confident are you in this judgment?
+                    <span className="block text-sm font-normal text-blue-200">
+                      This helps measure how well your confidence matches your
+                      accuracy for research and reflection.
+                    </span>
+                  </label>
+                  <input
+                    type="range"
+                    min="1"
+                    max="5"
+                    value={confidence}
+                    onChange={(e) => setConfidence(Number(e.target.value))}
+                    className="w-full"
+                  />
+                  <div className="flex justify-between text-xs text-blue-200 mt-1">
+                    <span>1: Just guessing</span>
+                    <span>3: Somewhat sure</span>
+                    <span>5: Very sure</span>
+                  </div>
+                  <div className="mt-1 text-sm text-blue-100">
+                    Current confidence:{" "}
+                    <span className="font-semibold">{confidence}/5</span>
+                  </div>
                 </div>
 
                 <div className="mb-4">
                   <label className="block font-semibold mb-2">
                     Optional: Did this scenario feel realistic?
-                    (Reasoning = up to +10 bonus points)
+                    <span className="block text-sm font-normal text-blue-200">
+                      Deeper reasoning can unlock bonus points and helps improve
+                      future research.
+                    </span>
                   </label>
                   <textarea
                     value={reasoning}
                     onChange={(e) => setReasoning(e.target.value)}
                     className="w-full bg-white/10 border border-white/20 rounded-lg p-3 text-white placeholder-blue-300"
                     rows={3}
-                    placeholder="Why did you choose this answer?"
+                    placeholder="Why did you choose this answer? What signals felt manipulative or safe?"
                   />
                 </div>
 
                 <button
                   onClick={handleSubmit}
-                  disabled={!selectedAnswer}
+                  disabled={!selectedAnswer && timeLeft > 0}
                   className="w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 disabled:from-gray-500 disabled:to-gray-600 disabled:opacity-50 rounded-xl p-4 font-bold text-lg transition-all"
                 >
-                  Submit Answer
+                  Log Your Judgment
                 </button>
               </>
             ) : (
               <div className="space-y-4">
                 <div
                   className={`flex items-center gap-3 p-4 rounded-lg ${
-                    gameResults[gameResults.length - 1].correct
+                    lastResult?.correct
                       ? "bg-green-500/20 border-2 border-green-400"
                       : "bg-red-500/20 border-2 border-red-400"
                   }`}
                 >
-                  {gameResults[gameResults.length - 1].correct ? (
+                  {lastResult?.correct ? (
                     <CheckCircle className="w-8 h-8 text-green-400" />
                   ) : (
                     <XCircle className="w-8 h-8 text-red-400" />
                   )}
                   <div>
                     <div className="font-bold text-xl">
-                      {gameResults[gameResults.length - 1].correct
-                        ? "Correct!"
-                        : "Incorrect"}
+                      {lastResult?.correct
+                        ? "Correct – nice catch!"
+                        : "Not quite – good learning moment."}
                     </div>
-                    <div>
-                      +{gameResults[gameResults.length - 1].points} points
+                    <div>+{lastResult?.points ?? 0} points</div>
+                    <div className="text-sm text-blue-100 mt-1 space-y-1">
+                      {lastResult?.timeTaken !== undefined && (
+                        <div>
+                          Speed bonus: {60 - lastResult.timeTaken}s left
+                        </div>
+                      )}
+                      {lastResult?.reasoningBonus > 0 && (
+                        <div>
+                          💡 Deep reasoning bonus: +
+                          {lastResult.reasoningBonus}
+                        </div>
+                      )}
+                      {lastResult?.streakBonus > 0 && (
+                        <div>
+                          🔥 Streak bonus (x{lastResult.streakAtQuestion}):
+                          +{lastResult.streakBonus}
+                        </div>
+                      )}
+                      {lastResult?.confidence && (
+                        <div>
+                          🎯 Confidence this case: {lastResult.confidence}/5
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
 
                 <div className="bg-white/10 rounded-lg p-4">
-                  <div className="font-semibold mb-2">Explanation:</div>
+                  <div className="font-semibold mb-2">
+                    Investigator Notes:
+                  </div>
                   <p className="text-blue-100">
                     {currentScene.explanation}
                   </p>
-                  {!gameResults[gameResults.length - 1].correct && (
+                  {!lastResult?.correct && (
                     <p className="mt-2 text-yellow-200">
-                      Correct answer:{" "}
+                      Correct tactic:{" "}
                       <strong>
                         {getTacticName(currentScene.correctAnswer)}
                       </strong>
@@ -747,11 +878,11 @@ export default function ManipulationHunterGame() {
                 >
                   {currentScenario < scenarios.length - 1 ? (
                     <>
-                      Next Scenario <ChevronRight />
+                      Next Case <ChevronRight />
                     </>
                   ) : (
                     <>
-                      View Results <Award />
+                      View Case Report <Award />
                     </>
                   )}
                 </button>
@@ -764,45 +895,115 @@ export default function ManipulationHunterGame() {
   }
 
   if (gameState === "results") {
-    const accuracy = (
-      (gameResults.filter((r) => r.correct).length / gameResults.length) *
-      100
-    ).toFixed(0);
+    const correctCount = gameResults.filter((r) => r.correct).length;
+    const total = gameResults.length || 1;
+    const accuracyValue = (correctCount / total) * 100;
+    const accuracy = accuracyValue.toFixed(0);
+
     const avgTime = (
-      gameResults.reduce((sum, r) => sum + r.timeTaken, 0) /
-      gameResults.length
+      gameResults.reduce((sum, r) => sum + r.timeTaken, 0) / total
     ).toFixed(1);
+
+    const questionsWithReasoning = gameResults.filter(
+      (r) => r.reasoningProvided
+    ).length;
+
+    const avgConfidence =
+      gameResults.length > 0
+        ? (
+            gameResults.reduce((sum, r) => sum + (r.confidence || 0), 0) /
+            total
+          ).toFixed(2)
+        : "0.00";
+
+    // Calibration for very high confidence answers (5/5)
+    const highConfCases = gameResults.filter((r) => r.confidence === 5);
+    const highConfTotal = highConfCases.length;
+    const highConfCorrect = highConfCases.filter((r) => r.correct).length;
+    const highConfAccuracy =
+      highConfTotal > 0
+        ? ((highConfCorrect / highConfTotal) * 100).toFixed(0)
+        : null;
+
+    const rankTitle = getRankTitle(accuracyValue, maxStreak);
 
     return (
       <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 text-white p-8">
         <div className="max-w-4xl mx-auto">
           <div className="text-center mb-8">
-            <h1 className="text-4xl font-bold mb-4">Game Complete!</h1>
+            <h1 className="text-4xl font-bold mb-2">
+              Case Review Complete
+            </h1>
+            <p className="text-lg text-blue-200 mb-4">
+              Investigator Rank:{" "}
+              <span className="font-semibold text-yellow-300">
+                {rankTitle}
+              </span>
+            </p>
             <div className="text-6xl font-bold text-yellow-400 mb-2">
               {score}
             </div>
-            <div className="text-xl text-blue-200">Total Points</div>
+            <div className="text-xl text-blue-200">
+              Total Investigation Score
+            </div>
           </div>
 
-          <div className="grid md:grid-cols-3 gap-4 mb-8">
-            <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-6 text-center">
+          <div className="grid md:grid-cols-4 gap-4 mb-8">
+            <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-6 text-center md:col-span-1">
               <Target className="w-8 h-8 mx-auto mb-2 text-green-400" />
               <div className="text-3xl font-bold">{accuracy}%</div>
               <div className="text-blue-200">Accuracy</div>
             </div>
-            <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-6 text-center">
+            <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-6 text-center md:col-span-1">
               <Zap className="w-8 h-8 mx-auto mb-2 text-yellow-400" />
               <div className="text-3xl font-bold">{avgTime}s</div>
-              <div className="text-blue-200">Avg Time</div>
+              <div className="text-blue-200">Avg Time / Case</div>
             </div>
-            <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-6 text-center">
+            <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-6 text-center md:col-span-1">
               <Award className="w-8 h-8 mx-auto mb-2 text-blue-400" />
               <div className="text-3xl font-bold">
-                {gameResults.filter((r) => r.correct).length}/
-                {gameResults.length}
+                {correctCount}/{total}
               </div>
-              <div className="text-blue-200">Correct</div>
+              <div className="text-blue-200">Correct Files</div>
             </div>
+            <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-6 text-center md:col-span-1">
+              <Brain className="w-8 h-8 mx-auto mb-2 text-purple-300" />
+              <div className="text-3xl font-bold">{maxStreak}</div>
+              <div className="text-blue-200">Best Streak</div>
+            </div>
+          </div>
+
+          <div className="bg-white/10 backdrop-blur border border-white/20 rounded-xl p-4 mb-4 text-sm text-blue-100">
+            <span className="font-semibold text-blue-50">
+              Research Summary Clue:
+            </span>{" "}
+            You wrote reasoning on {questionsWithReasoning}/{total} cases, with
+            an average confidence of {avgConfidence}/5. Comparing confidence to
+            accuracy helps understand when people feel sure vs. when they’re
+            actually right.
+            <br />
+            {highConfAccuracy !== null ? (
+              <>
+                When you were{" "}
+                <span className="font-semibold text-yellow-200">
+                  very confident (5/5)
+                </span>
+                , you were correct{" "}
+                <span className="font-semibold text-yellow-200">
+                  {highConfAccuracy}%
+                </span>{" "}
+                of the time ({highConfCorrect}/{highConfTotal} cases).
+              </>
+            ) : (
+              <>
+                You didn’t use{" "}
+                <span className="font-semibold text-yellow-200">
+                  very high confidence (5/5)
+                </span>{" "}
+                on any case this run, so calibration at that level isn’t
+                measured yet.
+              </>
+            )}
           </div>
 
           <div className="space-y-4 mb-8">
@@ -815,7 +1016,7 @@ export default function ManipulationHunterGame() {
               >
                 <div className="flex justify-between items-start mb-2">
                   <div className="font-bold">
-                    {result.scenario.context}
+                    Case {idx + 1}: {result.scenario.context}
                   </div>
                   <div
                     className={`px-3 py-1 rounded-full text-sm ${
@@ -826,9 +1027,16 @@ export default function ManipulationHunterGame() {
                   </div>
                 </div>
                 <div className="text-sm text-blue-200">
-                  Your answer: {getTacticName(result.selected)} • Correct:{" "}
+                  Your answer:{" "}
+                  {result.selected
+                    ? getTacticName(result.selected)
+                    : "No answer"}{" "}
+                  • Correct:{" "}
                   {getTacticName(result.scenario.correctAnswer)} • Time:{" "}
-                  {result.timeTaken}s
+                  {result.timeTaken}s • Streak at this case:{" "}
+                  {result.streakAtQuestion} • Confidence:{" "}
+                  {result.confidence}/5
+                  {result.reasoningProvided && " • Reasoning provided"}
                 </div>
               </div>
             ))}
@@ -839,13 +1047,13 @@ export default function ManipulationHunterGame() {
               onClick={() => setGameState("menu")}
               className="flex-1 bg-white/10 hover:bg-white/20 backdrop-blur border border-white/20 rounded-xl p-4 font-bold transition-all"
             >
-              Main Menu
+              Return to HQ
             </button>
             <button
               onClick={() => startGame(difficulty)}
               className="flex-1 bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 rounded-xl p-4 font-bold transition-all"
             >
-              Play Again
+              Investigate Another Case
             </button>
           </div>
         </div>
