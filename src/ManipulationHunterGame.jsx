@@ -653,7 +653,7 @@ export default function ManipulationHunterGame() {
 
                 <div className="mb-4">
                   <label className="block font-semibold mb-2">
-                    Optional: Did this scenario feel realistic or unsettling?
+                    Optional: Did this scenario feel realistic?
                     (Reasoning = up to +10 bonus points)
                   </label>
                   <textarea
